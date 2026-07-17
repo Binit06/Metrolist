@@ -1,4 +1,4 @@
-name: Sync Upstream and Build (Custom Package)
+name: Sync Upstream, Build, and Publish
 
 on:
   schedule:
@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  discussions: write
 
 jobs:
   sync:
@@ -41,12 +42,11 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
-    name: Build Custom APK (${{ matrix.variant }})
+  build_release:
+    name: Build Release (${{ matrix.variant }})
     needs: sync
     if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
         include:
@@ -54,12 +54,14 @@ jobs:
             variantName: Foss
           - variant: gms
             variantName: Gms
-
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           submodules: recursive
+
+      - name: Replace GitHub API Base URL in Updater.kt
+        run: find . -type f -name "Updater.kt" -exec sed -i 's|MetrolistGroup/Metrolist|Binit06/Metrolist|g' {} +
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -69,50 +71,121 @@ jobs:
 
       - name: Set Up Gradle
         uses: gradle/actions/setup-gradle@v3
-        with:
-          cache-encryption-key: ${{ secrets.GRADLE_CACHE_KEY }}
-          cache-cleanup: on-success
-
-      - name: Replace GitHub API Base URL in Updater.kt
-        run: find . -type f -name "Updater.kt" -exec sed -i 's|MetrolistGroup/Metrolist|Binit06/Metrolist|g' {} +
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Generate debug keystore
-        run: |
-          mkdir -p ~/.android
-          keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "C=US, O=Android, CN=Android Debug"
-
-      - name: Build Debug APK with custom package name
-        run: ./gradlew --console=plain assemble${{ matrix.variantName }}Debug --warning-mode summary
+      - name: Build Release APK
+        run: ./gradlew --console=plain assemble${{ matrix.variantName }}Release --warning-mode summary
         env:
           METROLIST_APPLICATION_ID: com.netease.cloudmusic
-          METROLIST_APP_NAME: Metrolist
+          METROLIST_APP_NAME: Metrolist Fork
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
 
-      - name: Upload APK
+      - name: Sign APK
+        uses: ilharp/sign-android-release@v3
+        with:
+          releaseDir: app/build/outputs/apk/${{ matrix.variant }}/release/
+          signingKey: ${{ secrets.KEYSTORE }}
+          keyAlias: ${{ secrets.KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
+          keyPassword: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Move signed APK
+        run: |
+          OUTPUT_DIR="app/build/outputs/apk/${{ matrix.variant }}/release"
+          mkdir -p "$OUTPUT_DIR/out"
+          if [ "${{ matrix.variant }}" = "gms" ]; then
+            TARGET_NAME="Metrolist-GMS.apk"
+          else
+            TARGET_NAME="Metrolist-FOSS.apk"
+          fi
+          find "$OUTPUT_DIR" -name "*-signed.apk" -o -name "*-unsigned-signed.apk" | xargs -I{} mv {} "$OUTPUT_DIR/out/$TARGET_NAME"
+
+      - name: Upload Signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: metrolist-${{ matrix.variant }}-${{ github.run_number }}
+          name: release-${{ matrix.variant }}-${{ github.run_number }}
+          path: app/build/outputs/apk/${{ matrix.variant }}/release/out/*.apk
+          retention-days: 14
+
+  build_debug:
+    name: Build Debug (${{ matrix.variant }})
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - variant: foss
+            variantName: Foss
+          - variant: gms
+            variantName: Gms
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Replace GitHub API Base URL in Updater.kt
+        run: find . -type f -name "Updater.kt" -exec sed -i 's|MetrolistGroup/Metrolist|Binit06/Metrolist|g' {} +
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+
+      - name: Set Up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Generate debug keystore
+        run: |
+          keytool -genkey -v -keystore ./app/persistent-debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "C=US, O=Android, CN=Android Debug"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew --console=plain assemble${{ matrix.variantName }}Debug --warning-mode summary
+        env:
+          METROLIST_APPLICATION_ID: com.netease.cloudmusic
+          METROLIST_APP_NAME: Metrolist Fork
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
+
+      - name: Rename and Upload Debug APK
+        run: |
+          OUTPUT_DIR="app/build/outputs/apk/${{ matrix.variant }}/debug"
+          if [ "${{ matrix.variant }}" = "gms" ]; then
+            mv $OUTPUT_DIR/app-gms-debug.apk $OUTPUT_DIR/Metrolist-GMS-Debug.apk
+          else
+            mv $OUTPUT_DIR/app-foss-debug.apk $OUTPUT_DIR/Metrolist-FOSS-Debug.apk
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ matrix.variant }}-${{ github.run_number }}
           path: app/build/outputs/apk/${{ matrix.variant }}/debug/*.apk
           retention-days: 14
 
-  release:
-    name: Create GitHub Release
-    needs: [sync, build]
-    if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+  publish_release:
+    name: Publish Release to GitHub
+    needs: build_release
     runs-on: ubuntu-latest
     steps:
-      - name: Download built APKs
+      - name: Download Release Artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: release-*
+          merge-multiple: true
           path: apks
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: update-${{ github.run_number }}
-          name: Auto-build Update ${{ github.run_number }}
-          files: apks/**/*.apk
+          name: Metrolist Auto-build Update ${{ github.run_number }}
+          generate_release_notes: true
+          files: apks/*.apk
