@@ -23,7 +23,7 @@ jobs:
           submodules: recursive
           # Must be a PAT, not the default GITHUB_TOKEN, so that the push
           # below actually triggers build.yml / release.yml downstream.
-          token: ${{ secrets.RELEASE_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
  
       - name: Fetch and merge upstream/main (keeping our own .github)
         run: |
@@ -292,7 +292,7 @@ jobs:
 
       - name: Create Release
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Creating release v${{ needs.check-version.outputs.new_version }}"
 
