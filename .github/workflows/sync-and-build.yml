@@ -1,0 +1,113 @@
+name: Sync Upstream and Build (Custom Package)
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync fork with upstream
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Fetch and merge upstream/main
+        id: sync
+        run: |
+          git remote add upstream https://github.com/MetrolistGroup/Metrolist.git
+          git fetch upstream main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BEFORE=$(git rev-parse HEAD)
+          git merge upstream/main --no-edit
+          AFTER=$(git rev-parse HEAD)
+
+          git push origin HEAD:main
+
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build Custom APK (${{ matrix.variant }})
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - variant: foss
+            variantName: Foss
+          - variant: gms
+            variantName: Gms
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+
+      - name: Set Up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_CACHE_KEY }}
+          cache-cleanup: on-success
+
+      - name: Replace GitHub API Base URL in Updater.kt
+        run: find . -type f -name "Updater.kt" -exec sed -i 's|MetrolistGroup/Metrolist|Binit06/Metrolist|g' {} +
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK with custom package name
+        run: ./gradlew --console=plain assemble${{ matrix.variantName }}Debug --warning-mode summary
+        env:
+          METROLIST_APPLICATION_ID: com.netease.cloudmusic
+          METROLIST_APP_NAME: Metrolist
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrolist-${{ matrix.variant }}-${{ github.run_number }}
+          path: app/build/outputs/apk/${{ matrix.variant }}/debug/*.apk
+          retention-days: 14
+
+  release:
+    name: Create GitHub Release
+    needs: [sync, build]
+    if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download built APKs
+        uses: actions/download-artifact@v4
+        with:
+          path: apks
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: update-${{ github.run_number }}
+          name: Auto-build Update ${{ github.run_number }}
+          files: apks/**/*.apk
