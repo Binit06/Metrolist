@@ -34,6 +34,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      
+      - name: Replace GitHub API Base URL in Updater.kt
+        run: find . -type f -name "Updater.kt" -exec sed -i 's|MetrolistGroup/Metrolist|Binit06/Metrolist|g' {} +
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -104,6 +107,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      
+      - name: Replace GitHub API Base URL in Updater.kt
+        run: find . -type f -name "Updater.kt" -exec sed -i 's|MetrolistGroup/Metrolist|Binit06/Metrolist|g' {} +
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5

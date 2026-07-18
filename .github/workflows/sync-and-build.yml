@@ -24,19 +24,20 @@ jobs:
           # Must be a PAT, not the default GITHUB_TOKEN, so that the push
           # below actually triggers build.yml / release.yml downstream.
           token: ${{ secrets.RELEASE_TOKEN }}
- 
+
       - name: Fetch and merge upstream/main (keeping our own .github)
+        id: sync
         run: |
           git remote add upstream https://github.com/MetrolistGroup/Metrolist.git
           git fetch upstream main
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
- 
+
           BEFORE=$(git rev-parse HEAD)
- 
+
           # Pull in everything from upstream, including .github for now
           git merge upstream/main --no-edit
- 
+
           # Throw away whatever upstream did to .github and restore our
           # own version exactly as it was before the merge. Covers files
           # upstream modified, added, or deleted.
@@ -44,26 +45,28 @@ jobs:
           rm -rf .github
           git checkout "$BEFORE" -- .github
           git add -A .github
- 
+
           if ! git diff --cached --quiet; then
             git commit -m "chore: restore local .github after upstream sync"
           fi
- 
+
           AFTER=$(git rev-parse HEAD)
- 
+
           # Compare trees ignoring .github, so a fixup commit that only
           # reverts .github doesn't count as "real" change.
           if git diff --quiet "$BEFORE" "$AFTER" -- . ':!.github'; then
             echo "No changes outside .github — nothing to push."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git push origin HEAD:main
-            echo "Pushed new changes. build.yml and release.yml will pick this up automatically."
+            echo "Pushed new changes."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-
 
   build_release:
     name: Build Release (${{ matrix.variant }})
-    if: github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]'
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' && github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]'
     runs-on: ubuntu-latest
 
     strategy:
@@ -78,6 +81,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      
+      - name: Replace GitHub API Base URL in Updater.kt
+        run: find . -type f -name "Updater.kt" -exec sed -i 's|MetrolistGroup/Metrolist|Binit06/Metrolist|g' {} +
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -133,7 +139,8 @@ jobs:
 
   build_debug:
     name: Build Debug (${{ matrix.variant }})
-    if: github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]'
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' && github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]'
     runs-on: ubuntu-latest
 
     strategy:
@@ -148,6 +155,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      
+      - name: Replace GitHub API Base URL in Updater.kt
+        run: find . -type f -name "Updater.kt" -exec sed -i 's|MetrolistGroup/Metrolist|Binit06/Metrolist|g' {} +
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -167,7 +177,7 @@ jobs:
       - name: Generate debug keystore
         run: |
           keytool -genkey -v -keystore ./app/persistent-debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "C=US, O=Android, CN=Android Debug"
-      
+
       - name: Build Debug APK and Run Lint
         run: ./gradlew --console=plain assemble${{ matrix.variantName }}Debug :app:lint${{ matrix.variantName }}Debug --warning-mode summary
         env:
@@ -185,7 +195,8 @@ jobs:
           path: app/build/outputs/apk/${{ matrix.variant }}/debug/*.apk
 
   check-version:
-    if: "!contains(github.ref, 'refs/tags')"
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' && !contains(github.ref, 'refs/tags')
     runs-on: ubuntu-latest
     outputs:
       version_changed: ${{ steps.check_version.outputs.version_changed }}
@@ -220,7 +231,7 @@ jobs:
           if git show HEAD^:app/build.gradle.kts > /dev/null 2>&1; then
             OLD_VERSION=$(git show HEAD^:app/build.gradle.kts | grep -oP 'versionName\s*=\s*"\K[^"]+' || echo "")
             echo "Previous version: $OLD_VERSION"
-            
+
             if [ "$OLD_VERSION" != "$NEW_VERSION" ]; then
               echo "Version changed from $OLD_VERSION to $NEW_VERSION"
               echo "version_changed=true" >> $GITHUB_OUTPUT
@@ -246,8 +257,8 @@ jobs:
           echo "  - event_name: ${{ github.event_name }}"
 
   create-release:
-    needs: [check-version, build_release]
-    if: needs.check-version.outputs.version_changed == 'true' || github.event_name == 'workflow_dispatch'
+    needs: [sync, check-version, build_release]
+    if: needs.sync.outputs.changed == 'true' && (needs.check-version.outputs.version_changed == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
