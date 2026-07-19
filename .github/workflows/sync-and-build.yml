@@ -21,41 +21,47 @@ jobs:
           ref: main
           fetch-depth: 0
           submodules: recursive
-          # Must be a PAT, not the default GITHUB_TOKEN, so that the push
-          # below actually triggers build.yml / release.yml downstream.
           token: ${{ secrets.RELEASE_TOKEN }}
 
-      - name: Fetch and merge upstream/main (keeping our own .github)
+      - name: Ensure .github is never merged from upstream
+        run: |
+          git config merge.ours.driver true
+          if [ -f .gitattributes ]; then
+            grep -qxF '.github/** merge=ours' .gitattributes || echo '.github/** merge=ours' >> .gitattributes
+          else
+            echo '.github/** merge=ours' > .gitattributes
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- .gitattributes 2>/dev/null || [ -n "$(git status --porcelain .gitattributes)" ]; then
+            git add .gitattributes
+            git commit -m "chore: never merge .github from upstream" || true
+            git push origin HEAD:main
+          fi
+
+      - name: Fetch and merge upstream/main
         id: sync
         run: |
           git remote add upstream https://github.com/MetrolistGroup/Metrolist.git
           git fetch upstream main
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
 
           BEFORE=$(git rev-parse HEAD)
 
-          # Pull in everything from upstream, including .github for now
-          git merge upstream/main --no-edit
-
-          # Throw away whatever upstream did to .github and restore our
-          # own version exactly as it was before the merge. Covers files
-          # upstream modified, added, or deleted.
-          git rm -r --cached .github > /dev/null 2>&1 || true
-          rm -rf .github
-          git checkout "$BEFORE" -- .github
-          git add -A .github
-
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: restore local .github after upstream sync"
+          # merge=ours already protects .github; for every other path,
+          # prefer upstream's side automatically instead of hard-failing.
+          if git merge upstream/main --no-edit -X theirs; then
+            echo "Merge completed cleanly (or auto-resolved via -X theirs)."
+          else
+            echo "::error::Merge hit a conflict Git couldn't auto-resolve (likely a delete/modify or binary/submodule conflict). Manual fix required."
+            git diff --name-only --diff-filter=U
+            git merge --abort
+            exit 1
           fi
 
           AFTER=$(git rev-parse HEAD)
 
-          # Compare trees ignoring .github, so a fixup commit that only
-          # reverts .github doesn't count as "real" change.
-          if git diff --quiet "$BEFORE" "$AFTER" -- . ':!.github'; then
-            echo "No changes outside .github — nothing to push."
+          if git diff --quiet "$BEFORE" "$AFTER"; then
+            echo "No changes — nothing to push."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git push origin HEAD:main
